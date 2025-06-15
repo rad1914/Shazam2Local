@@ -2,91 +2,111 @@ import fs from 'fs/promises';
 import path from 'path';
 import { parse } from 'csv-parse/sync';
 import { fileURLToPath } from 'url';
-import { exec as _exec } from 'child_process';
 import { promisify } from 'util';
+import { exec as _exec } from 'child_process';
 
 const exec = promisify(_exec);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const CSV_PATH    = path.join(__dirname, 'library.csv');
 const RECORD_PATH = path.join(__dirname, 'downloaded.json');
-const OUT_DIR     = path.join(__dirname, 'downloads');
-const MIN_BITRATE = 64; // (no longer used, but kept here in case you want to add any bitrate logic)
+const OUT_DIR = path.join(__dirname, 'downloads');
+const TEMP_DIR = path.join(__dirname, 'temp');
+const FORMAT = 'opus', QUALITY = '8';
+const YTDLP_FLAGS = `-x --audio-format ${FORMAT} --audio-quality ${QUALITY}`;
 
-async function loadRecord() {
+const log = (tag, icon) => msg => console[tag](`${icon} ${msg}`);
+const info = log('log', 'ℹ️'), warn = log('warn', '⚠️'), error = log('error', '❌');
+const success = log('log', '✔️'), summary = log('log', '📊');
+
+const sanitize = s => s.replace(/[<>:"/\\|?*\x00-\x1F]/g, '').trim();
+const equalsIgnoreCase = (a = '', b = '') => a.localeCompare(b, undefined, { sensitivity: 'base' }) === 0;
+const getField = (row, ...fields) => fields.map(f => row[f]?.trim()).find(Boolean) || '';
+
+const loadRecord = async () => {
   try {
     return JSON.parse(await fs.readFile(RECORD_PATH, 'utf8'));
   } catch {
-    await fs.writeFile(RECORD_PATH, '[]');
+    await fs.writeFile(RECORD_PATH, '[]', 'utf8');
     return [];
   }
-}
+};
+const saveRecord = data => fs.writeFile(RECORD_PATH, JSON.stringify(data, null, 2), 'utf8');
 
-async function saveRecord(arr) {
-  await fs.writeFile(RECORD_PATH, JSON.stringify(arr, null, 2));
-}
+const processCsv = async (csvPath, record) => {
+  const sourceFile = path.basename(csvPath);
+  let rows;
 
-async function main() {
-  // Ensure output directory exists
-  await fs.mkdir(OUT_DIR, { recursive: true });
-  const record = await loadRecord();
-
-  let csv;
   try {
-    csv = await fs.readFile(CSV_PATH, 'utf8');
-  } catch (e) {
-    console.error(`Cannot read CSV: ${e.message}`);
+    const content = await fs.readFile(csvPath, 'utf8');
+    rows = parse(content, { from_line: 2, columns: true, skip_empty_lines: true, relax_quotes: true });
+  } catch (err) {
+    error(`Error reading "${sourceFile}": ${err.message}`);
+    return;
+  }
+
+  let downloaded = 0, skipped = 0, modified = false;
+
+  for (const row of rows) {
+    const title = getField(row, 'Title', 'Song'), artist = getField(row, 'Artist', 'Performer');
+    if (!title || !artist) continue;
+
+if (record.some(e => 
+  equalsIgnoreCase(e.title, title) && 
+  equalsIgnoreCase(e.artist, artist)
+)) {
+  warn(`Skipped (already): "${title}" by ${artist}`);
+  skipped++;
+  continue;
+}
+
+
+    const base = `${sanitize(title)} - ${sanitize(artist)}`;
+    const temp = path.join(TEMP_DIR, `${base}.%(ext)s`);
+    const final = path.join(OUT_DIR, `${base}.${FORMAT}`);
+    const query = `ytsearch1:${title} ${artist}`;
+
+    info(`Searching: ${query}`);
+
+    try {
+      await exec(`yt-dlp ${YTDLP_FLAGS} -o "${temp}" "${query}"`);
+      const file = (await fs.readdir(TEMP_DIR)).find(f => f.startsWith(base) && f.endsWith(`.${FORMAT}`));
+      if (!file) {
+        warn(`No ${FORMAT} found for "${title}"`);
+        continue;
+      }
+
+      await fs.rename(path.join(TEMP_DIR, file), final);
+      record.push({ title, artist, sourceFile });
+      modified = true;
+      downloaded++;
+      success(`Downloaded: "${title}" by ${artist}`);
+    } catch (err) {
+      error(`Failed "${title}" by ${artist}: ${err.message}`);
+    }
+  }
+
+  if (modified) await saveRecord(record);
+  summary(`"${sourceFile}": downloaded ${downloaded}, skipped ${skipped}`);
+};
+
+(async () => {
+  try {
+    await exec('yt-dlp --version');
+  } catch {
+    error('yt-dlp not found in PATH');
     process.exit(1);
   }
 
-  const rows = parse(csv, {
-    from_line: 2,
-    columns: true,
-    skip_empty_lines: true,
-    relax_quotes: true,
-  });
+  await Promise.all([fs.mkdir(OUT_DIR, { recursive: true }), fs.mkdir(TEMP_DIR, { recursive: true })]);
 
-  for (let row of rows) {
-    const title  = (row.Title  || '').trim();
-    const artist = (row.Artist || '').trim();
-    if (!title || !artist) continue;
+  const record = await loadRecord();
+  const csvFiles = (await fs.readdir(__dirname)).filter(f => f.toLowerCase().endsWith('.csv'));
+  if (!csvFiles.length) return warn('No CSV files found.');
 
-    // Skip if already downloaded
-    if (record.some(e => e.title === title && e.artist === artist)) continue;
-
-    // Build search query and output filename
-    const query = `${title} ${artist} audio`;
-    const escapedTitle  = title.replace(/"/g, '\\"');
-    const escapedArtist = artist.replace(/"/g, '\\"');
-    const filename = `${escapedTitle} - ${escapedArtist}.opus`;
-    const outFile  = path.join(OUT_DIR, filename);
-
-    // Run yt-dlp with opus extraction only
-    try {
-      await exec(
-        `yt-dlp -x --audio-format opus --audio-quality 8 -o "${outFile}" "ytsearch1:${query}"`
-      );
-    } catch (err) {
-      console.error(`Failed to download "${title}" by ${artist}: ${err.message}`);
-      continue;
-    }
-
-    // Verify that yt-dlp actually produced something
-    try {
-      await fs.access(outFile);
-    } catch {
-      console.error(`No file found after download for "${title}" by ${artist}`);
-      continue;
-    }
-
-    // Record success
-    record.push({ title, artist });
-    await saveRecord(record);
-    console.log(`Downloaded: ${filename}`);
+  for (const file of csvFiles) {
+    info(`\nProcessing "${file}"`);
+    await processCsv(path.join(__dirname, file), record);
   }
-}
 
-main().catch(err => {
-  console.error(`Fatal: ${err.message}`);
-  process.exit(1);
-});
+  info('All done!');
+})();
