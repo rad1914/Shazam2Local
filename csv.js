@@ -7,10 +7,12 @@ import { processEntries } from './downloader.js';
 
 export const processCsv = async (csvPath, record) => {
   const sourceFile = path.basename(csvPath);
+  const failedPath = path.join(path.dirname(csvPath), 'failed.txt');
+
   try {
-    const raw = (await fs.readFile(csvPath, 'utf8'))
-      .replace(/\u0000/g, '')
-      .replace(/\r/g, '');
+    let raw = (await fs.readFile(csvPath, 'utf8'))
+      .replace(/\u0000|\r/g, '')
+      .replace(/\(From\s+"([^"]+)"\)/g, "(From '$1')");
 
     const lines = raw.split('\n').slice(2).filter(Boolean);
     if (!lines.length) {
@@ -19,42 +21,38 @@ export const processCsv = async (csvPath, record) => {
     }
 
     const headers = ['Index', 'TagTime', 'Title', 'Artist', 'URL', 'TrackKey'];
-    const validRows = lines.flatMap((line, i) => {
+    const validRows = [];
+
+    for (let i = 0; i < lines.length; i++) {
       try {
-        return parse(headers.join(',') + '\n' + line, {
+        validRows.push(...parse(headers.join(',') + '\n' + lines[i], {
           columns: true,
           relax_quotes: true,
           relax_column_count: true,
           skip_empty_lines: true,
           trim: true
-        });
+        }));
       } catch {
-        console.warn(`⚠️ Línea ${i + 3} ignorada por formato inválido`);
-        return [];
+        const lineNum = i + 3;
+        console.warn(`⚠️ Línea ${lineNum} ignorada por formato inválido`);
+        await fs.appendFile(failedPath, `Line ${lineNum}: ${lines[i]}\n`, 'utf8');
       }
-    });
+    }
 
-    const entries = validRows
-      .map(r => {
-        const title = getField(r, 'Title', 'Song', 'Track Name', 'Name');
-        const artist = getField(r, 'Artist', 'Performer', 'Artist Name');
-        return title && artist ? { title, artist, sourceFile } : null;
-      })
-      .filter(Boolean);
+    const entries = validRows.map(r => {
+      const title = getField(r, 'Title', 'Song', 'Track Name', 'Name');
+      const artist = getField(r, 'Artist', 'Performer', 'Artist Name');
+      return title && artist ? { title, artist, sourceFile } : null;
+    }).filter(Boolean);
 
-    return processEntries(
-      entries,
-      record,
-      e => ({
-        title: e.title,
-        artist: e.artist,
-        query: `ytsearch1:${e.title} ${e.artist}`,
-        finalName: `${e.title} - ${e.artist}`,
-        checkKeys: buildCheckKeys(e, 'csv'),
-        extraMeta: { sourceFile: e.sourceFile }
-      }),
-      `"${sourceFile}"`
-    );
+    return processEntries(entries, record, e => ({
+      title: e.title,
+      artist: e.artist,
+      query: `ytsearch1:${e.title} ${e.artist}`,
+      finalName: `${e.title} - ${e.artist}`,
+      checkKeys: buildCheckKeys(e, 'csv'),
+      extraMeta: { sourceFile: e.sourceFile }
+    }), `"${sourceFile}"`);
   } catch (err) {
     console.error(`❌ Error reading "${sourceFile}": ${err.message}`);
     return emptyResult();

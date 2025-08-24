@@ -15,13 +15,13 @@ export const downloadEntry = async (meta, record) => {
     `yt-dlp ${YTDLP_FLAGS}${client ? ` --extractor-args "youtube:player_client=${client}"` : ''} -o "${final}" "${meta.query}"`;
 
   try {
-    // First try (android client already included in config.js)
+
     await exec(baseCmd());
     record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
     success(`Downloaded: "${meta.finalName}"`);
     return { success: true };
   } catch (err) {
-    // Retry fallback with iOS client
+
     try {
       warn(`Retrying "${meta.finalName}" with iOS client...`);
       await exec(baseCmd('ios'));
