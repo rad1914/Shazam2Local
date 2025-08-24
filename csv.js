@@ -2,7 +2,8 @@
 import fs from 'fs/promises';
 import { parse } from 'csv-parse/sync';
 import path from 'path';
-import { getField } from './utils.js';
+
+import { getField, emptyResult, buildCheckKeys } from './utils.js';
 import { processEntries } from './downloader.js';
 
 export const processCsv = async (csvPath, record) => {
@@ -10,10 +11,16 @@ export const processCsv = async (csvPath, record) => {
   let rows;
   try {
     const content = await fs.readFile(csvPath, 'utf8');
-    rows = parse(content, { from_line: 2, columns: true, skip_empty_lines: true, relax_quotes: true });
+    rows = parse(content, {
+      from_line: 2,
+      columns: true,
+      skip_empty_lines: true,
+      relax_quotes: true,
+      trim: true
+    });
   } catch (err) {
-    console.error(`Error reading "${sourceFile}": ${err.message}`);
-    return { successful: [], failed: [] };
+    console.error(`❌ Error reading "${sourceFile}": ${err.message}`);
+    return emptyResult();
   }
 
   const entries = rows.map(row => {
@@ -29,7 +36,7 @@ export const processCsv = async (csvPath, record) => {
     artist: e.artist,
     query: `ytsearch1:${e.title} ${e.artist}`,
     finalName: `${e.title} - ${e.artist}`,
-    checkKeys: { title: e.title, artist: e.artist },
+    checkKeys: buildCheckKeys(e, 'csv'),
     extraMeta: { sourceFile: e.sourceFile }
   }), `"${sourceFile}"`);
 };

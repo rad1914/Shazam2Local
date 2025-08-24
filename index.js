@@ -1,20 +1,16 @@
 // @path: index.js
 import fs from 'fs/promises';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import { promisify } from 'util';
-import { exec as _exec } from 'child_process';
 
+import { exec } from './exec.js';
+import { getDirname } from './paths.js';
 import { error, warn, info, summary, success } from './utils.js';
 import { loadRecord } from './record.js';
 import { processCsv } from './csv.js';
 import { processPlaylist } from './playlist.js';
+import { OUT_DIR, TEMP_DIR } from './config.js';
 
-const exec = promisify(_exec);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-const OUT_DIR = path.join(__dirname, 'downloads');
-const TEMP_DIR = path.join(__dirname, 'temp');
+const __dirname = getDirname(import.meta.url);
 
 (async () => {
   try {
@@ -26,7 +22,7 @@ const TEMP_DIR = path.join(__dirname, 'temp');
 
   await Promise.all([fs.mkdir(OUT_DIR, { recursive: true }), fs.mkdir(TEMP_DIR, { recursive: true })]);
 
-  const mode = process.argv[2];
+  const [,, mode, arg] = process.argv;
   if (!mode) {
     error('Usage:\n  node index.js csv\n  node index.js playlist <playlist-url>');
     process.exit(1);
@@ -58,13 +54,12 @@ const TEMP_DIR = path.join(__dirname, 'temp');
     }
 
   } else if (mode === 'playlist') {
-    const playlistUrl = process.argv[3];
-    if (!playlistUrl) {
+    if (!arg) {
       error('Usage: node index.js playlist <playlist-url>');
       process.exit(1);
     }
 
-    const { successful, failed } = await processPlaylist(playlistUrl, record);
+    const { successful, failed } = await processPlaylist(arg, record);
 
     summary(`\n📊 Session summary:`);
     success(`Successful: ${successful.length}`);
