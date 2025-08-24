@@ -2,3 +2,4 @@ node_modules/
 downloads/
 downloaded.json
 *.csv
+temp
