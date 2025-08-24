@@ -10,14 +10,28 @@ export const recordExists = (record, keys) =>
 
 export const downloadEntry = async (meta, record) => {
   const final = path.join(OUT_DIR, `${sanitize(meta.finalName)}.${FORMAT}`);
+
+  const baseCmd = (client = null) =>
+    `yt-dlp ${YTDLP_FLAGS}${client ? ` --extractor-args "youtube:player_client=${client}"` : ''} -o "${final}" "${meta.query}"`;
+
   try {
-    await exec(`yt-dlp ${YTDLP_FLAGS} -o "${final}" "${meta.query}"`);
+    // First try (android client already included in config.js)
+    await exec(baseCmd());
     record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
     success(`Downloaded: "${meta.finalName}"`);
     return { success: true };
   } catch (err) {
-    error(`Failed "${meta.finalName}": ${err.message}`);
-    return { success: false, reason: err.message };
+    // Retry fallback with iOS client
+    try {
+      warn(`Retrying "${meta.finalName}" with iOS client...`);
+      await exec(baseCmd('ios'));
+      record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
+      success(`Downloaded (iOS fallback): "${meta.finalName}"`);
+      return { success: true };
+    } catch (err2) {
+      error(`Failed "${meta.finalName}": ${err2.message}`);
+      return { success: false, reason: err2.message };
+    }
   }
 };
 
