@@ -1,3 +1,4 @@
+// @path: ytPlaylist.js
 import fs from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -30,9 +31,6 @@ const loadRecord = async () => {
 };
 const saveRecord = data => fs.writeFile(RECORD_PATH, JSON.stringify(data, null, 2), 'utf8');
 
-/**
- * Download a YouTube playlist
- */
 const processPlaylist = async (playlistUrl, record) => {
   info(`Fetching playlist metadata...`);
   let output;
@@ -115,7 +113,6 @@ const processPlaylist = async (playlistUrl, record) => {
   const record = await loadRecord();
   const { successful, failed } = await processPlaylist(playlistUrl, record);
 
-  // --- Final summary ---
   summary(`\n📊 Session summary:`);
   success(`Successful: ${successful.length}`);
   failed.length > 0

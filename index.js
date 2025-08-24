@@ -1,3 +1,4 @@
+// @path: index.js
 import fs from 'fs/promises';
 import path from 'path';
 import { parse } from 'csv-parse/sync';
@@ -92,6 +93,69 @@ const processCsv = async (csvPath, record) => {
   return successfulDownloads;
 };
 
+const processPlaylist = async (playlistUrl, record) => {
+  info(`Fetching playlist metadata...`);
+  let output;
+  try {
+    const { stdout } = await exec(
+      `yt-dlp --flat-playlist --print "%(id)s\\t%(title)s" "${playlistUrl}"`
+    );
+    output = stdout.trim().split('\n').filter(Boolean);
+  } catch (err) {
+    error(`Failed to fetch playlist: ${err.message}`);
+    return { successful: [], failed: [] };
+  }
+
+  const successfulDownloads = [];
+  const failedDownloads = [];
+  let downloaded = 0, skipped = 0, modified = false;
+
+  for (const line of output) {
+    const [id, titleRaw] = line.split('\t');
+    const title = sanitize(titleRaw || id);
+    const url = `https://youtu.be/${id}`;
+
+    if (record.some(e => equalsIgnoreCase(e.id, id))) {
+      warn(`Skipped (already): "${title}"`);
+      skipped++;
+      continue;
+    }
+
+    const base = sanitize(title);
+    const temp = path.join(TEMP_DIR, `${base}.%(ext)s`);
+    const final = path.join(OUT_DIR, `${base}.${FORMAT}`);
+
+    info(`Downloading: "${title}"`);
+
+    try {
+      await exec(`yt-dlp ${YTDLP_FLAGS} -o "${temp}" "${url}"`);
+      const file = (await fs.readdir(TEMP_DIR))
+        .find(f => f.startsWith(base) && f.endsWith(`.${FORMAT}`));
+
+      if (!file) {
+        warn(`No ${FORMAT} found for "${title}"`);
+        failedDownloads.push({ id, title, reason: `No ${FORMAT} file found` });
+        continue;
+      }
+
+      await fs.rename(path.join(TEMP_DIR, file), final);
+      const newEntry = { id, title, playlist: playlistUrl };
+      record.push(newEntry);
+      successfulDownloads.push(newEntry);
+      modified = true;
+      downloaded++;
+      success(`Downloaded: "${title}"`);
+    } catch (err) {
+      error(`Failed "${title}": ${err.message}`);
+      failedDownloads.push({ id, title, reason: err.message });
+    }
+  }
+
+  if (modified) await saveRecord(record);
+  summary(`Playlist done: downloaded ${downloaded}, skipped ${skipped}`);
+  return { successful: successfulDownloads, failed: failedDownloads };
+};
+
 (async () => {
   try {
     await exec('yt-dlp --version');
@@ -101,29 +165,64 @@ const processCsv = async (csvPath, record) => {
   }
 
   await Promise.all([fs.mkdir(OUT_DIR, { recursive: true }), fs.mkdir(TEMP_DIR, { recursive: true })]);
-  
-  const allNewDownloads = [];
+
+  const mode = process.argv[2];
+  if (!mode) {
+    error('Usage:\n  node index.js csv\n  node index.js playlist <playlist-url>');
+    process.exit(1);
+  }
+
   const record = await loadRecord();
-  const csvFiles = (await fs.readdir(__dirname)).filter(f => f.toLowerCase().endsWith('.csv'));
 
-  if (!csvFiles.length) {
-    warn('No CSV files found.');
-    return;
-  }
+  if (mode === 'csv') {
+    const csvFiles = (await fs.readdir(__dirname)).filter(f => f.toLowerCase().endsWith('.csv'));
+    if (!csvFiles.length) {
+      warn('No CSV files found.');
+      return;
+    }
 
-  for (const file of csvFiles) {
-    info(`\nProcessing "${file}"`);
-    const newDownloads = await processCsv(path.join(__dirname, file), record);
-    allNewDownloads.push(...newDownloads);
-  }
+    const allNewDownloads = [];
+    for (const file of csvFiles) {
+      info(`\nProcessing "${file}"`);
+      const newDownloads = await processCsv(path.join(__dirname, file), record);
+      allNewDownloads.push(...newDownloads);
+    }
 
-  if (allNewDownloads.length > 0) {
-    summary(`\n📊 All successful downloads this session:`);
-    allNewDownloads.forEach(({ title, artist }) => {
-      success(`"${title}" by ${artist}`);
-    });
+    if (allNewDownloads.length > 0) {
+      summary(`\n📊 All successful downloads this session:`);
+      allNewDownloads.forEach(({ title, artist }) => {
+        success(`"${title}" by ${artist}`);
+      });
+    } else {
+      info('\nNo new songs were downloaded in this session.');
+    }
+
+  } else if (mode === 'playlist') {
+    const playlistUrl = process.argv[3];
+    if (!playlistUrl) {
+      error('Usage: node index.js playlist <playlist-url>');
+      process.exit(1);
+    }
+
+    const { successful, failed } = await processPlaylist(playlistUrl, record);
+
+    summary(`\n📊 Session summary:`);
+    success(`Successful: ${successful.length}`);
+    failed.length > 0
+      ? error(`Failed: ${failed.length}`)
+      : info(`Failed: 0`);
+
+    if (successful.length > 0) {
+      console.log('\n✔️ Successful downloads:');
+      successful.forEach(({ title }) => console.log(`   - ${title}`));
+    }
+    if (failed.length > 0) {
+      console.log('\n❌ Failed downloads:');
+      failed.forEach(({ title, reason }) => console.log(`   - ${title} (${reason})`));
+    }
   } else {
-    info('\nNo new songs were downloaded in this session.');
+    error(`Unknown mode: ${mode}`);
+    process.exit(1);
   }
 
   info('\nAll done!');
