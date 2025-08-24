@@ -1,29 +1,22 @@
 // @path: downloader.js
 import path from 'path';
 import { exec } from './exec.js';
-import { getDirname } from './paths.js';
 import { sanitize, equalsIgnoreCase, warn, success, error, summary } from './utils.js';
 import { saveRecord } from './record.js';
 import { OUT_DIR, FORMAT, YTDLP_FLAGS } from './config.js';
 
-const __dirname = getDirname(import.meta.url);
-
 export const recordExists = (record, keys) =>
   record.some(e => Object.keys(keys).every(k => equalsIgnoreCase(e[k] || '', keys[k])));
 
-export const downloadEntry = async ({ id, title, artist, query, finalName, extraMeta }, record) => {
-  const base = sanitize(finalName);
-  const final = path.join(OUT_DIR, `${base}.${FORMAT}`);
-
+export const downloadEntry = async (meta, record) => {
+  const final = path.join(OUT_DIR, `${sanitize(meta.finalName)}.${FORMAT}`);
   try {
-    await exec(`yt-dlp ${YTDLP_FLAGS} -o "${final}" "${query}"`);
-
-    const newEntry = { id, title, artist, ...extraMeta };
-    record.push(newEntry);
-    success(`Downloaded: "${finalName}"`);
-    return { success: true, entry: newEntry };
+    await exec(`yt-dlp ${YTDLP_FLAGS} -o "${final}" "${meta.query}"`);
+    record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
+    success(`Downloaded: "${meta.finalName}"`);
+    return { success: true };
   } catch (err) {
-    error(`Failed "${finalName}": ${err.message}`);
+    error(`Failed "${meta.finalName}": ${err.message}`);
     return { success: false, reason: err.message };
   }
 };
@@ -37,14 +30,14 @@ export const processEntries = async (entries, record, buildMeta, sourceLabel) =>
     if (!meta) continue;
 
     if (recordExists(record, meta.checkKeys)) {
-      warn(`Skipped (already): "${meta.finalName}"`);
+      warn(`Skipped: "${meta.finalName}"`);
       skipped++;
       continue;
     }
 
     const result = await downloadEntry(meta, record);
     if (result.success) {
-      successful.push(result.entry);
+      successful.push(meta);
       downloaded++;
       modified = true;
     } else {

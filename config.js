@@ -6,14 +6,5 @@ const __dirname = getDirname(import.meta.url);
 
 export const OUT_DIR = path.join(__dirname, 'downloads');
 export const TEMP_DIR = path.join(__dirname, 'temp');
-
 export const FORMAT = 'opus';
-export const QUALITY = '3';
-
-export const YTDLP_FLAGS = [
-  '-x',
-  '--no-playlist',
-  '--restrict-filenames',
-  `--audio-format=${FORMAT}`,
-  `--audio-quality=${QUALITY}`
-].join(' ');
+export const YTDLP_FLAGS = `-x --no-playlist --restrict-filenames --audio-format=${FORMAT} --audio-quality=3`;

@@ -3,38 +3,28 @@ import { exec } from './exec.js';
 import { sanitize, error, info, emptyResult, buildCheckKeys } from './utils.js';
 import { processEntries } from './downloader.js';
 
-export const processPlaylist = async (playlistUrl, record) => {
-  info(`Fetching playlist metadata...`);
-  let output;
+export const processPlaylist = async (url, record) => {
+  info(`Fetching playlist...`);
   try {
-    const { stdout } = await exec(
-      `yt-dlp --flat-playlist --print-json "${playlistUrl}"`
-    );
-    output = stdout.trim().split('\n').filter(Boolean);
+    const { stdout } = await exec(`yt-dlp --flat-playlist --print-json "${url}"`);
+    const entries = stdout.trim().split('\n').map(line => {
+      try {
+        const d = JSON.parse(line);
+        return { id: d.id, title: sanitize(d.title || d.id), playlistUrl: url };
+      } catch { return null; }
+    }).filter(Boolean);
+
+    const unique = [...new Map(entries.map(e => [e.id, e])).values()];
+    return processEntries(unique, record, e => ({
+      id: e.id,
+      title: e.title,
+      query: `https://youtu.be/${e.id}`,
+      finalName: e.title,
+      checkKeys: buildCheckKeys(e, 'playlist'),
+      extraMeta: { playlist: e.playlistUrl }
+    }), 'Playlist');
   } catch (err) {
-    error(`Failed to fetch playlist: ${err.message}`);
+    error(`Playlist fetch failed: ${err.message}`);
     return emptyResult();
   }
-
-  const entries = output.map(line => {
-    try {
-      const data = JSON.parse(line);
-      return { id: data.id, title: sanitize(data.title || data.id), playlistUrl };
-    } catch {
-      return null;
-    }
-  }).filter(Boolean);
-
-  const unique = new Map(entries.map(e => [e.id, e]));
-  const finalEntries = Array.from(unique.values());
-
-  return processEntries(finalEntries, record, e => ({
-    id: e.id,
-    title: e.title,
-    artist: undefined,
-    query: `https://youtu.be/${e.id}`,
-    finalName: e.title,
-    checkKeys: buildCheckKeys(e, 'playlist'),
-    extraMeta: { playlist: e.playlistUrl }
-  }), `Playlist`);
 };
