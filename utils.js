@@ -24,5 +24,6 @@ export const emptyResult = () => ({ successful: [], failed: [] });
 export const buildCheckKeys = (entry, type) => {
   if (type === 'csv') return { title: entry.title, artist: entry.artist };
   if (type === 'playlist') return { id: entry.id };
+  if (type === 'filenames') return { title: entry.title };
   return {};
 };

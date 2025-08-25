@@ -3,3 +3,5 @@ downloads/
 downloaded.json
 *.csv
 temp
+failed.txt
+filenames.txt

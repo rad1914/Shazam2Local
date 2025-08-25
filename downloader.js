@@ -1,4 +1,5 @@
 // @path: downloader.js
+import fs from 'fs/promises';
 import path from 'path';
 import { exec } from './exec.js';
 import { sanitize, equalsIgnoreCase, warn, success, error, summary } from './utils.js';
@@ -11,17 +12,24 @@ export const recordExists = (record, keys) =>
 export const downloadEntry = async (meta, record) => {
   const final = path.join(OUT_DIR, `${sanitize(meta.finalName)}.${FORMAT}`);
 
+  // 🔹 Check if file already exists on disk
+  try {
+    await fs.access(final);
+    warn(`Skipped (file exists): "${meta.finalName}"`);
+    return { success: true, skipped: true };
+  } catch {
+    // continue to download
+  }
+
   const baseCmd = (client = null) =>
     `yt-dlp ${YTDLP_FLAGS}${client ? ` --extractor-args "youtube:player_client=${client}"` : ''} -o "${final}" "${meta.query}"`;
 
   try {
-
     await exec(baseCmd());
     record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
     success(`Downloaded: "${meta.finalName}"`);
     return { success: true };
   } catch (err) {
-
     try {
       warn(`Retrying "${meta.finalName}" with iOS client...`);
       await exec(baseCmd('ios'));
@@ -43,14 +51,17 @@ export const processEntries = async (entries, record, buildMeta, sourceLabel) =>
     const meta = buildMeta(e);
     if (!meta) continue;
 
+    // Check against record
     if (recordExists(record, meta.checkKeys)) {
-      warn(`Skipped: "${meta.finalName}"`);
+      warn(`Skipped (in record): "${meta.finalName}"`);
       skipped++;
       continue;
     }
 
     const result = await downloadEntry(meta, record);
-    if (result.success) {
+    if (result.success && result.skipped) {
+      skipped++;
+    } else if (result.success) {
       successful.push(meta);
       downloaded++;
       modified = true;
