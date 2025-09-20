@@ -1,0 +1,368 @@
+// @path: csv.js
+import fs from 'fs/promises';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { getField, emptyResult, buildCheckKeys } from './utils.js';
+import { processEntries } from './downloader.js';
+
+export const processCsv = async (csvPath, record) => {
+  const sourceFile = path.basename(csvPath);
+  const failedPath = path.join(path.dirname(csvPath), 'failed.txt');
+
+  try {
+    let raw = (await fs.readFile(csvPath, 'utf8'))
+      .replace(/\u0000|\r/g, '')
+      .replace(/\(From\s+"([^"]+)"\)/g, "(From '$1')");
+
+    const lines = raw.split('\n').slice(2).filter(Boolean);
+    if (!lines.length) {
+      console.error(`❌ Archivo CSV inválido: ${sourceFile}`);
+      return emptyResult();
+    }
+
+    const headers = ['Index', 'TagTime', 'Title', 'Artist', 'URL', 'TrackKey'];
+    const validRows = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        validRows.push(...parse(headers.join(',') + '\n' + lines[i], {
+          columns: true,
+          relax_quotes: true,
+          relax_column_count: true,
+          skip_empty_lines: true,
+          trim: true
+        }));
+      } catch {
+        const lineNum = i + 3;
+        console.warn(`⚠️ Línea ${lineNum} ignorada por formato inválido`);
+        await fs.appendFile(failedPath, `Line ${lineNum}: ${lines[i]}\n`, 'utf8');
+      }
+    }
+
+    const entries = validRows.map(r => {
+      const title = getField(r, 'Title', 'Song', 'Track Name', 'Name');
+      const artist = getField(r, 'Artist', 'Performer', 'Artist Name');
+      return title && artist ? { title, artist, sourceFile } : null;
+    }).filter(Boolean);
+
+    return processEntries(entries, record, e => ({
+      title: e.title,
+      artist: e.artist,
+      query: `ytsearch1:${e.title} ${e.artist}`,
+      finalName: `${e.title} - ${e.artist}`,
+      checkKeys: buildCheckKeys(e, 'csv'),
+      extraMeta: { sourceFile: e.sourceFile }
+    }), `"${sourceFile}"`);
+  } catch (err) {
+    console.error(`❌ Error reading "${sourceFile}": ${err.message}`);
+    return emptyResult();
+  }
+};
+// @path: downloader.js
+import fs from 'fs/promises';
+import path from 'path';
+import { exec } from './exec.js';
+import { sanitize, equalsIgnoreCase, warn, success, error, summary } from './utils.js';
+import { saveRecord } from './record.js';
+import { OUT_DIR, FORMAT, YTDLP_FLAGS } from './config.js';
+
+export const recordExists = (record, keys) =>
+  record.some(e => Object.keys(keys).every(k => equalsIgnoreCase(e[k] || '', keys[k])));
+
+export const downloadEntry = async (meta, record) => {
+  const final = path.join(OUT_DIR, `${sanitize(meta.finalName)}.${FORMAT}`);
+
+  try {
+    await fs.access(final);
+    warn(`Skipped (file exists): "${meta.finalName}"`);
+    return { success: true, skipped: true };
+  } catch {
+
+  }
+
+  const baseCmd = (client = null) =>
+    `yt-dlp ${YTDLP_FLAGS}${client ? ` --extractor-args "youtube:player_client=${client}"` : ''} -o "${final}" "${meta.query}"`;
+
+  try {
+    await exec(baseCmd());
+    record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
+    success(`Downloaded: "${meta.finalName}"`);
+    return { success: true };
+  } catch (err) {
+    try {
+      warn(`Retrying "${meta.finalName}" with iOS client...`);
+      await exec(baseCmd('ios'));
+      record.push({ id: meta.id, title: meta.title, artist: meta.artist, ...meta.extraMeta });
+      success(`Downloaded (iOS fallback): "${meta.finalName}"`);
+      return { success: true };
+    } catch (err2) {
+      error(`Failed "${meta.finalName}": ${err2.message}`);
+      return { success: false, reason: err2.message };
+    }
+  }
+};
+
+export const processEntries = async (entries, record, buildMeta, sourceLabel) => {
+  const successful = [], failed = [];
+  let downloaded = 0, skipped = 0, modified = false;
+
+  for (const e of entries) {
+    const meta = buildMeta(e);
+    if (!meta) continue;
+
+    if (recordExists(record, meta.checkKeys)) {
+      warn(`Skipped (in record): "${meta.finalName}"`);
+      skipped++;
+      continue;
+    }
+
+    const result = await downloadEntry(meta, record);
+    if (result.success && result.skipped) {
+      skipped++;
+    } else if (result.success) {
+      successful.push(meta);
+      downloaded++;
+      modified = true;
+    } else {
+      failed.push({ ...meta.checkKeys, title: meta.title, reason: result.reason });
+    }
+  }
+
+  if (modified) await saveRecord(record);
+  summary(`${sourceLabel} done: downloaded ${downloaded}, skipped ${skipped}`);
+  return { successful, failed };
+};
+// @path: playlist.js
+import { exec } from './exec.js';
+import { sanitize, error, info, emptyResult, buildCheckKeys } from './utils.js';
+import { processEntries } from './downloader.js';
+
+export const processPlaylist = async (url, record) => {
+  info(`Fetching playlist...`);
+  try {
+    const { stdout } = await exec(`yt-dlp --flat-playlist --print-json "${url}"`);
+    const entries = stdout.trim().split('\n').map(line => {
+      try {
+        const d = JSON.parse(line);
+        return { id: d.id, title: sanitize(d.title || d.id), playlistUrl: url };
+      } catch { return null; }
+    }).filter(Boolean);
+
+    const unique = [...new Map(entries.map(e => [e.id, e])).values()];
+    return processEntries(unique, record, e => ({
+      id: e.id,
+      title: e.title,
+      query: `https://youtu.be/${e.id}`,
+      finalName: e.title,
+      checkKeys: buildCheckKeys(e, 'playlist'),
+      extraMeta: { playlist: e.playlistUrl }
+    }), 'Playlist');
+  } catch (err) {
+    error(`Playlist fetch failed: ${err.message}`);
+    return emptyResult();
+  }
+};
+// @path: config.js
+import path from 'path';
+import { getDirname } from './paths.js';
+
+const __dirname = getDirname(import.meta.url);
+
+export const OUT_DIR = path.join(__dirname, 'downloads');
+export const TEMP_DIR = path.join(__dirname, 'temp');
+
+export const FORMAT = 'best';
+
+export const YTDLP_FLAGS =
+  `-x --no-playlist --restrict-filenames --audio-format=${FORMAT} --audio-quality=0 -f bestaudio --postprocessor-args "-ar 48000 -ac 2" --extractor-args "youtube:player_client=android"`;
+// @path: record.js
+import fs from 'fs/promises';
+import path from 'path';
+import { getDirname } from './paths.js';
+
+const __dirname = getDirname(import.meta.url);
+const RECORD_PATH = path.join(__dirname, 'downloaded.json');
+
+export const loadRecord = async () => {
+  try {
+    const data = JSON.parse(await fs.readFile(RECORD_PATH, 'utf8'));
+    if (!Array.isArray(data)) throw new Error('Corrupted format');
+    return data;
+  } catch {
+    await fs.writeFile(RECORD_PATH, '[]', 'utf8');
+    return [];
+  }
+};
+
+export const saveRecord = async data => {
+  try {
+    await fs.copyFile(RECORD_PATH, `${RECORD_PATH}.bak`);
+  } catch {}
+  await fs.writeFile(RECORD_PATH, JSON.stringify(data, null, 2), 'utf8');
+};
+// @path: paths.js
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+export const getDirname = importMetaUrl =>
+  path.dirname(fileURLToPath(importMetaUrl));
+  
+// @path: exec.js
+import { promisify } from 'util';
+import { exec as _exec } from 'child_process';
+
+export const exec = promisify(_exec);
+// @path: index.js
+import fs from 'fs/promises';
+import path from 'path';
+import { exec } from './exec.js';
+import { getDirname } from './paths.js';
+import { error, warn, info, summary, success } from './utils.js';
+import { loadRecord } from './record.js';
+import { processCsv } from './csv.js';
+import { processPlaylist } from './playlist.js';
+import { processFilenames } from './filenames.js';
+import { OUT_DIR, TEMP_DIR } from './config.js';
+
+const __dirname = getDirname(import.meta.url);
+
+(async () => {
+  try {
+    await exec('yt-dlp --version');
+  } catch {
+    return error('yt-dlp not found in PATH'), process.exit(1);
+  }
+
+  await Promise.all([OUT_DIR, TEMP_DIR].map(d => fs.mkdir(d, { recursive: true })));
+
+  const [,, mode, arg] = process.argv;
+  if (!mode) return error('Usage:\n  node index.js csv\n  node index.js playlist <url>\n  node index.js filenames'), process.exit(1);
+
+  const record = await loadRecord();
+
+  if (mode === 'csv') {
+    const csvFiles = (await fs.readdir(__dirname)).filter(f => f.toLowerCase().endsWith('.csv'));
+    if (!csvFiles.length) return warn('No CSV files found.');
+
+    const allNew = [];
+    for (const file of csvFiles) {
+      info(`\nProcessing "${file}"`);
+      const { successful } = await processCsv(path.join(__dirname, file), record);
+      allNew.push(...successful);
+    }
+
+    allNew.length
+      ? (summary('\n📊 Downloads this session:'), allNew.forEach(({ title, artist }) =>
+          success(artist ? `"${title}" by ${artist}` : `"${title}"`)))
+      : info('\nNo new songs were downloaded.');
+  }
+
+  else if (mode === 'playlist') {
+    if (!arg) return error('Usage: node index.js playlist <url>'), process.exit(1);
+
+    const { successful, failed } = await processPlaylist(arg, record);
+
+    summary(`\n📊 Session summary:`);
+    success(`Successful: ${successful.length}`);
+    failed.length ? error(`Failed: ${failed.length}`) : info(`Failed: 0`);
+
+    if (successful.length) {
+      console.log('\n✔️ Successful downloads:');
+      successful.forEach(({ title }) => console.log(`   - ${title}`));
+    }
+    if (failed.length) {
+      console.log('\n❌ Failed downloads:');
+      failed.forEach(({ title, reason }) => console.log(`   - ${title} (${reason})`));
+    }
+  }
+
+  else if (mode === 'filenames') {
+    const txtFiles = (await fs.readdir(__dirname)).filter(f => f.toLowerCase() === 'filenames.txt');
+    if (!txtFiles.length) return warn('No filenames.txt found.');
+
+    const allNew = [];
+    for (const file of txtFiles) {
+      info(`\nProcessing "${file}"`);
+      const { successful } = await processFilenames(path.join(__dirname, file), record);
+      allNew.push(...successful);
+    }
+
+    allNew.length
+      ? (summary('\n📊 Downloads this session:'), allNew.forEach(({ title }) =>
+          success(`"${title}"`)))
+      : info('\nNo new songs were downloaded.');
+  }
+
+  else {
+    error(`Unknown mode: ${mode}`);
+    process.exit(1);
+  }
+
+  info('\nAll done!');
+})();
+// @path: filenames.js
+import fs from 'fs/promises';
+import path from 'path';
+import { info, warn, error, emptyResult, success, buildCheckKeys } from './utils.js';
+import { processEntries } from './downloader.js';
+
+export const processFilenames = async (txtPath, record) => {
+  const sourceFile = path.basename(txtPath);
+  try {
+    const raw = await fs.readFile(txtPath, 'utf8');
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
+    if (!lines.length) {
+      warn(`No filenames found in "${sourceFile}"`);
+      return emptyResult();
+    }
+
+    const entries = lines.map(line => {
+
+      const clean = line.replace(/^\.\/(a\/)?/, '');
+
+      const base = clean.replace(/\.[^/.]+$/, '');
+      return { title: base, fileLine: line };
+    });
+
+    return processEntries(entries, record, e => ({
+      title: e.title,
+      query: `ytsearch1:${e.title}`,
+      finalName: e.title,
+      checkKeys: buildCheckKeys(e, 'filenames'),
+      extraMeta: { sourceFile }
+    }), `"${sourceFile}"`);
+  } catch (err) {
+    error(`❌ Error reading "${sourceFile}": ${err.message}`);
+    return emptyResult();
+  }
+};
+// @path: utils.js
+const timestamp = () => `[${new Date().toISOString()}]`;
+
+export const log = (tag, icon) => msg =>
+  console[tag](`${timestamp()} ${icon} ${msg}`);
+
+export const info = log('log', 'ℹ️');
+export const warn = log('warn', '⚠️');
+export const error = log('error', '❌');
+export const success = log('log', '✔️');
+export const summary = log('log', '📊');
+
+export const sanitize = s =>
+  s.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+
+export const equalsIgnoreCase = (a = '', b = '') =>
+  a.localeCompare(b, undefined, { sensitivity: 'base' }) === 0;
+
+export const getField = (row, ...fields) =>
+  fields.map(f => row[f]?.trim()).find(Boolean) || '';
+
+export const emptyResult = () => ({ successful: [], failed: [] });
+
+export const buildCheckKeys = (entry, type) => {
+  if (type === 'csv') return { title: entry.title, artist: entry.artist };
+  if (type === 'playlist') return { id: entry.id };
+  if (type === 'filenames') return { title: entry.title };
+  return {};
+};

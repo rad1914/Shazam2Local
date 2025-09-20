@@ -6,7 +6,8 @@ const __dirname = getDirname(import.meta.url);
 
 export const OUT_DIR = path.join(__dirname, 'downloads');
 export const TEMP_DIR = path.join(__dirname, 'temp');
-export const FORMAT = 'opus';
+
+export const FORMAT = 'best';
 
 export const YTDLP_FLAGS =
-  `-x --no-playlist --restrict-filenames --audio-format=${FORMAT} --audio-quality=3 --extractor-args "youtube:player_client=android"`;
+  `-x --no-playlist --restrict-filenames --audio-format=${FORMAT} --audio-quality=0 -f bestaudio --postprocessor-args "-ar 48000 -ac 2" --extractor-args "youtube:player_client=android"`;

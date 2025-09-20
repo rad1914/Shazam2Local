@@ -12,13 +12,12 @@ export const recordExists = (record, keys) =>
 export const downloadEntry = async (meta, record) => {
   const final = path.join(OUT_DIR, `${sanitize(meta.finalName)}.${FORMAT}`);
 
-  // 🔹 Check if file already exists on disk
   try {
     await fs.access(final);
     warn(`Skipped (file exists): "${meta.finalName}"`);
     return { success: true, skipped: true };
   } catch {
-    // continue to download
+
   }
 
   const baseCmd = (client = null) =>
@@ -51,7 +50,6 @@ export const processEntries = async (entries, record, buildMeta, sourceLabel) =>
     const meta = buildMeta(e);
     if (!meta) continue;
 
-    // Check against record
     if (recordExists(record, meta.checkKeys)) {
       warn(`Skipped (in record): "${meta.finalName}"`);
       skipped++;
