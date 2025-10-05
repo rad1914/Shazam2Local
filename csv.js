@@ -1,4 +1,54 @@
 // @path: csv.js
-import fs from'fs/promises';import path from'path';import{parse}from'csv-parse/sync';import{g,n,k}from'./utils/utils.js';import{p}from'./downloader.js';
+import fs from 'fs/promises';
+import path from 'path';
+import { parse } from 'csv-parse/sync';
+import { getField, emptyResult, buildCheckKeys, normalizeCsvRaw } from './utils/utils.js';
+import { processEntries } from './downloader.js';
 
-export const a=async(c,r)=>{const s=path.basename(c),f=path.join(path.dirname(c),'failed.txt');try{const raw=(await fs.readFile(c,'utf8')).replace(/\u0000|\r/g,'').replace(/\(From\s+"([^"]+)"\)/g,"(From '$1')"),lines=raw.split('\n').slice(2).filter(Boolean);if(!lines.length)return n();const h=['Index','TagTime','Title','Artist','URL','TrackKey'],rows=[];for(let i=0;i<lines.length;i++){try{rows.push(...parse(`${h}\n${lines[i]}`,{columns:!0,relax_quotes:!0,relax_column_count:!0,skip_empty_lines:!0,trim:!0}))}catch{await fs.appendFile(f,`Line ${i+3}: ${lines[i]}\n`)}}const e=rows.map(r=>{const t=g(r,'Title','Song','Track Name','Name'),a=g(r,'Artist','Performer','Artist Name');return t&&a?{title:t,artist:a,sFile:s}:null}).filter(Boolean);return p(e,r,e=>({title:e.title,artist:e.artist,query:`ytsearch1:${e.title} ${e.artist}`,finalName:`${e.title} - ${e.artist}`,checkKeys:k(e,'csv'),extraMeta:{sourceFile:s}}),`"${s}"`)}catch{return n()}};
+export const processCsv = async (csvPath, record) => {
+  const sourceFile = path.basename(csvPath);
+  const failedPath = path.join(path.dirname(csvPath), 'failed.txt');
+
+  try {
+    const raw = normalizeCsvRaw(await fs.readFile(csvPath, 'utf8'));
+
+    const lines = raw.split('\n').slice(2).filter(Boolean);
+    if (!lines.length) return emptyResult();
+
+    const header = ['Index', 'TagTime', 'Title', 'Artist', 'URL', 'TrackKey'];
+    const rows = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      try {
+        rows.push(...parse(`${header}\n${lines[i]}`, {
+          columns: true,
+          relax_quotes: true,
+          relax_column_count: true,
+          skip_empty_lines: true,
+          trim: true
+        }));
+      } catch {
+        await fs.appendFile(failedPath, `Line ${i + 3}: ${lines[i]}\n`);
+      }
+    }
+
+    const entries = rows
+      .map(r => {
+        const title = getField(r, 'Title', 'Song', 'Track Name', 'Name');
+        const artist = getField(r, 'Artist', 'Performer', 'Artist Name');
+        return title && artist ? { title, artist, sourceFile } : null;
+      })
+      .filter(Boolean);
+
+    return processEntries(entries, record, (entry) => ({
+      title: entry.title,
+      artist: entry.artist,
+      query: `ytsearch1:${entry.title} ${entry.artist}`,
+      finalName: `${entry.title} - ${entry.artist}`,
+      checkKeys: buildCheckKeys(entry, 'csv'),
+      extraMeta: { sourceFile }
+    }), `"${sourceFile}"`);
+  } catch {
+    return emptyResult();
+  }
+};

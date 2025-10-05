@@ -9,7 +9,6 @@ export const O = path.join(__dirname, 'downloads');
 export const T = path.join(__dirname, 'temp');
 
 export const A = 'opus';
-
 export const X = '%(ext)s';
 
 export const Y =

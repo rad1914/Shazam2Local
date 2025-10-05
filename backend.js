@@ -1,113 +1,95 @@
+// @path: backend.js
 // @path: csv.js
-import fs from'fs/promises';import path from'path';import{parse}from'csv-parse/sync';import{g,n,k}from'./utils/utils.js';import{p}from'./downloader.js';
-
-export const a=async(c,r)=>{const s=path.basename(c),f=path.join(path.dirname(c),'failed.txt');try{const raw=(await fs.readFile(c,'utf8')).replace(/\u0000|\r/g,'').replace(/\(From\s+"([^"]+)"\)/g,"(From '$1')"),lines=raw.split('\n').slice(2).filter(Boolean);if(!lines.length)return n();const h=['Index','TagTime','Title','Artist','URL','TrackKey'],rows=[];for(let i=0;i<lines.length;i++){try{rows.push(...parse(`${h}\n${lines[i]}`,{columns:!0,relax_quotes:!0,relax_column_count:!0,skip_empty_lines:!0,trim:!0}))}catch{await fs.appendFile(f,`Line ${i+3}: ${lines[i]}\n`)}}const e=rows.map(r=>{const t=g(r,'Title','Song','Track Name','Name'),a=g(r,'Artist','Performer','Artist Name');return t&&a?{title:t,artist:a,sFile:s}:null}).filter(Boolean);return p(e,r,e=>({title:e.title,artist:e.artist,query:`ytsearch1:${e.title} ${e.artist}`,finalName:`${e.title} - ${e.artist}`,checkKeys:k(e,'csv'),extraMeta:{sourceFile:s}}),`"${s}"`)}catch{return n()}};
-// @path: downloader.js
+import fs from 'fs/promises';
 import path from 'path';
-import { exec } from './exec.js';
-import { z, w, k, s, e, S, r } from './utils/utils.js';
-import { sr, lr } from './record.js';
-import { O, Y, C, c } from './config.js';
+import { parse } from 'csv-parse/sync';
+import { getField, emptyResult, buildCheckKeys, normalizeCsvRaw } from './utils/utils.js';
+import { processEntries } from './downloader.js';
 
-const UNAVAILABLE_RE = /Video unavailable|This video is private|This content isn’t available|This video is unavailable|This live stream recording is not available|Cannot extract video/i;
+export const processCsv = async (csvPath, record) => {
+  const sourceFile = path.basename(csvPath);
+  const failedPath = path.join(path.dirname(csvPath), 'failed.txt');
 
-const runYtDl = async (cmd) => {
-  const res = await exec(cmd);
-  return res;
-};
-
-const findAvailableBySearch = async (query, client) => {
-  const safeQuery = query.replace(/"/g, '\\"');
-  const dumpCmd = `yt-dlp --dump-single-json "ytsearch5:${safeQuery}"${client ? ` --extractor-args "youtube:player_client=${client}"` : ''}`;
   try {
-    const { stdout } = await exec(dumpCmd);
-    const data = JSON.parse(stdout);
-    const entries = Array.isArray(data.entries) ? data.entries : (data.entries ? data.entries : []);
-    return entries.map(e => ({ id: e.id, url: `https://youtu.be/${e.id}`, title: e.title }));
-  } catch (err) {
-    return [];
-  }
-};
+    const raw = normalizeCsvRaw(await fs.readFile(csvPath, 'utf8'));
 
-const dl = async (m, rec, client) => {
-  const out = path.join(O, `${z(m.finalName)}.%(ext)s`);
-  const cookie = c() ? ` --cookies "${C}"` : '';
-  const clArg = client ? ` --extractor-args "youtube:player_client=${client}"` : '';
+    const lines = raw.split('\n').slice(2).filter(Boolean);
+    if (!lines.length) return emptyResult();
 
-  if (typeof m.query === 'string' && /^ytsearch/i.test(m.query)) {
-    const term = m.query.replace(/^ytsearch\d*:\s*/i, '');
-    const candidates = await findAvailableBySearch(term, client);
-    if (!candidates.length) throw new Error('No results from ytsearch');
-    for (const entry of candidates) {
+    const header = ['Index', 'TagTime', 'Title', 'Artist', 'URL', 'TrackKey'];
+    const rows = [];
+
+    for (let i = 0; i < lines.length; i++) {
       try {
-        await runYtDl(`yt-dlp ${Y}${cookie}${clArg} -o "${out}" "${entry.url}"`);
-        rec.push({ id: entry.id, title: m.title, artist: m.artist, ...m.extraMeta });
-        s(`Downloaded${client ? ` (${client})` : ''}: "${m.finalName}"`);
-        return;
-      } catch (err) {
-        const msg = (err.stderr || err.stdout || err.message || '').toString();
-        if (UNAVAILABLE_RE.test(msg)) throw new Error(msg);
-        w(`Failed candidate ${entry.id} for "${m.finalName}": ${msg}`);
+        rows.push(...parse(`${header}\n${lines[i]}`, {
+          columns: true,
+          relax_quotes: true,
+          relax_column_count: true,
+          skip_empty_lines: true,
+          trim: true
+        }));
+      } catch {
+        await fs.appendFile(failedPath, `Line ${i + 3}: ${lines[i]}\n`);
       }
     }
-    throw new Error('All search candidates failed');
-  }
 
-  await runYtDl(`yt-dlp ${Y}${cookie}${clArg} -o "${out}" "${m.query}"`);
-  rec.push({ id: m.id, title: m.title, artist: m.artist, ...m.extraMeta });
-  s(`Downloaded${client ? ` (${client})` : ''}: "${m.finalName}"`);
-};
+    const entries = rows
+      .map(r => {
+        const title = getField(r, 'Title', 'Song', 'Track Name', 'Name');
+        const artist = getField(r, 'Artist', 'Performer', 'Artist Name');
+        return title && artist ? { title, artist, sourceFile } : null;
+      })
+      .filter(Boolean);
 
-export const tryDownload = async (m, rec) => {
-  try {
-    const disk = await lr();
-    if (r(disk, m.checkKeys)) {
-      w(`Already recorded on-disk, skipping: "${m.finalName}"`);
-      return { success: false, skipped: true, reason: 'already_recorded' };
-    }
-  } catch (err) {
-    w(`Warning: couldn't read downloaded.json before download attempt: ${err.message}`);
-  }
-
-  if (r(rec, m.checkKeys)) {
-    w(`Already recorded in session, skipping: "${m.finalName}"`);
-    return { success: false, skipped: true, reason: 'already_recorded_in_session' };
-  }
-
-  for (const client of [null, 'android', 'web']) {
-    try {
-      await dl(m, rec, client);
-      return { success: true };
-    } catch (err) {
-      const msg = (err.stderr || err.stdout || err.message || '').toString();
-      if (UNAVAILABLE_RE.test(msg)) {
-        e(`Failed "${m.finalName}": ${msg}`);
-        return { success: false, reason: msg };
-      }
-      if (client === 'web') {
-        e(`Failed "${m.finalName}": ${msg}`);
-        return { success: false, reason: msg };
-      }
-      w(`Retrying "${m.finalName}" with ${client ?? 'default'} client...`);
-    }
+    return processEntries(entries, record, (entry) => ({
+      title: entry.title,
+      artist: entry.artist,
+      query: `ytsearch1:${entry.title} ${entry.artist}`,
+      finalName: `${entry.title} - ${entry.artist}`,
+      checkKeys: buildCheckKeys(entry, 'csv'),
+      extraMeta: { sourceFile }
+    }), `"${sourceFile}"`);
+  } catch {
+    return emptyResult();
   }
 };
-
-export const p = async (entries, rec, buildMeta, label) => {
-  const sArr = [], f = []; let d = 0, sk = 0, m = false;
-  for (const ee of entries) {
-    const mObj = buildMeta(ee); if (!mObj) continue;
-    if (r(rec, mObj.checkKeys)) { w(`Skipped: "${mObj.finalName}"`); sk++; continue }
-    const res = await tryDownload(mObj, rec);
-    if (res.skipped) { sk++; continue }
-    if (res.success) { sArr.push(mObj); d++; m = true } else f.push({ ...mObj.checkKeys, title: mObj.title, reason: res.reason });
-  }
-  if (m) await sr(rec);
-  S(`${label} done: downloaded ${d}, skipped ${sk}`);
-  return { successful: sArr, failed: f };
-};
+// @path: downloader.js
+import path from'path';import{exec}from'./exec.js';import{sanitizeFilename,w,s,e,S,recordMatches,stripFileNoise}from'./utils/utils.js';import{sr,lr}from'./record.js';import{O,Y,C,c as cookiesExist}from'./config.js';const UNAVAILABLE=/Video unavailable|private|not available|rate-limited/i,RATE_LIMIT=/rate[- ]limited|session has been rate-limited/i,outPath=m=>path.join(O,`${sanitizeFilename(m.finalName)}.%(ext)s`),run=cmd=>exec(cmd),searchCandidates=q=>{const b=stripFileNoise(q).trim();return[b,b.replace(/[-–—()].*$/,''),b.split(/\s+/).slice(0,6).join(' '),q].filter(Boolean)},findBySearch=async(q,client)=>{for(const sq of searchCandidates(q))for(const n of[5,10]){const cmd=`yt-dlp --dump-single-json "ytsearch${n}:${sq.replace(/"/g,'\\"')}"${client?` --extractor-args "youtube:player_client=${client}"`:''}`;try{const{stdout}=await run(cmd),{entries=[]}=JSON.parse(stdout);if(entries.length)return entries.map(e=>({id:e.id,url:`https://youtu.be/${e.id}`,title:e.title}))}catch(err){w(`Search fail "${sq}" (${n}): ${(err.stderr||err.message||'').slice(0,150)}`)}}return[]},tryYtDl=(u,m,client,useCookies=!0,sleep=!1)=>run(`yt-dlp ${Y}${useCookies&&cookiesExist()?` --cookies "${C}"`:''}${client?` --extractor-args "youtube:player_client=${client}"`:''}${sleep?' --sleep-interval 5 --max-sleep-interval 10':''} -o "${outPath(m)}" "${u}"`),download=async(m,rec,client)=>{const handleErr=async(err,url,useCookies)=>{const msg=(err.stderr||err.stdout||err.message||'').toString();if(UNAVAILABLE.test(msg)){if(RATE_LIMIT.test(msg)&&useCookies&&cookiesExist()){w(`Rate-limit detected. Retrying "${m.finalName}" without cookies...`),await tryYtDl(url,m,client,!1,!0);return!0}throw new Error(msg)}throw err};if(/^ytsearch/i.test(m.query)){const term=m.query.replace(/^ytsearch\d*:\s*/i,''),results=await findBySearch(term,client);for(const{id,url,title}of results)try{await tryYtDl(url,m,client),rec.push({id,title,artist:m.artist,...m.extraMeta}),s(`Downloaded${client?` (${client})`:''}: "${m.finalName}"`);return}catch(err){try{if(await handleErr(err,url,!0))return}catch{w(`Skip ${id} (${title})`)}}throw new Error('All search candidates failed')}try{await tryYtDl(m.query,m,client),rec.push({id:m.id,title:m.title,artist:m.artist,...m.extraMeta}),s(`Downloaded${client?` (${client})`:''}: "${m.finalName}"`)}catch(err){await handleErr(err,m.query,!0),rec.push({id:m.id,title:m.title,artist:m.artist,...m.extraMeta})}},tryDownload=async(m,rec)=>{const already=a=>recordMatches(a,m.checkKeys);try{if(already(await lr()))return w(`Skip (disk): "${m.finalName}"`),{success:!1,skipped:!0}}catch{w(`Warn: couldn't read downloaded.json`)}if(already(rec))return w(`Skip (session): "${m.finalName}"`),{success:!1,skipped:!0};for(const client of[null,'android','web'])try{if(already(await lr()))return w(`Skip (post-check): "${m.finalName}"`),{success:!1,skipped:!0};await download(m,rec,client),await sr(rec).catch(err=>w(`Write fail after "${m.finalName}": ${err.message}`));return{success:!0}}catch(err){const msg=(err.stderr||err.message||'').toString();if(UNAVAILABLE.test(msg)||client==='web')return e(`Fail "${m.finalName}": ${msg}`),{success:!1,reason:msg};w(`Retrying "${m.finalName}" via ${client??'default'} client...`)}};export const processEntries=async(entries,rec,buildMeta,label)=>{const ok=[],fail=[];let done=0,skip=0,mod=!1;for(const e of entries){const m=buildMeta(e);if(!m)continue;if(recordMatches(rec,m.checkKeys)){w(`Skip: "${m.finalName}"`),skip++;continue}const res=await tryDownload(m,rec);if(res.skipped){skip++;continue}res.success?(ok.push(m),done++,mod=!0):fail.push({...m.checkKeys,title:m.title,reason:res.reason})}if(mod)await sr(rec).catch(err=>w(`Write fail: ${err.message}`));return S(`${label} done: downloaded ${done}, skipped ${skip}`),{successful:ok,failed:fail}};
 // @path: playlist.js
-import{exec}from'./exec.js';import{z,e,i,n,k}from'./utils/utils.js';import{p}from'./downloader.js';export const c=async(u,r)=>{i('Fetching playlist...');try{const{stdout}=await exec(`yt-dlp --flat-playlist --print-json "${u}"`),a=stdout.trim().split('\n').map(l=>{try{const d=JSON.parse(l);return{id:d.id,title:z(d.title||d.id),u}}catch{return null}}).filter(Boolean),b=[...new Map(a.map(x=>[x.id,x])).values()];return p(b,r,x=>({id:x.id,title:x.title,query:`https://youtu.be/${x.id}`,finalName:x.title,checkKeys:k(x,'playlist'),extraMeta:{playlist:x.u}}),'Playlist')}catch(t){e(`Playlist fetch failed: ${t.message}`);return n()}};
+import { exec } from './exec.js';
+import { sanitizeFilename, e as logError } from './utils/utils.js';
+import { processEntries } from './downloader.js';
+
+export const processPlaylist = async (url, rec) => {
+  try {
+    console.log(`[${new Date().toISOString()}] ℹ️ Fetching playlist...`);
+    const { stdout } = await exec(`yt-dlp --flat-playlist --print-json "${url}"`);
+    const lines = stdout.trim().split('\n');
+
+    const parsed = lines.map(l => {
+      try {
+        const d = JSON.parse(l);
+        return { id: d.id, title: sanitizeFilename(d.title || d.id), u: url };
+      } catch {
+        return null;
+      }
+    }).filter(Boolean);
+
+    const uniq = [...new Map(parsed.map(x => [x.id, x])).values()];
+
+    return processEntries(uniq, rec, x => ({
+      id: x.id,
+      title: x.title,
+      query: `https://youtu.be/${x.id}`,
+      finalName: x.title,
+      checkKeys: { id: x.id },
+      extraMeta: { playlist: x.u }
+    }), 'Playlist');
+  } catch (t) {
+    logError(`Playlist fetch failed: ${t.message}`);
+    return { successful: [], failed: [] };
+  }
+};
 // @path: config.js
 import path from 'path';
 import fs from 'fs';
@@ -119,7 +101,6 @@ export const O = path.join(__dirname, 'downloads');
 export const T = path.join(__dirname, 'temp');
 
 export const A = 'opus';
-
 export const X = '%(ext)s';
 
 export const Y =
@@ -133,27 +114,221 @@ export const c = () => {
     return false;
   }
 };
-// @path: record.js
-import { readFile, writeFile, copyFile } from 'fs/promises'; import { join } from 'path'; import { D } from './utils/utils.js'; const f = join(D(import.meta.url), 'downloaded.json'); export const lr=async()=>{try{const d=JSON.parse(await readFile(f,'utf8'));if(!Array.isArray(d))throw 0;return d;}catch{await writeFile(f,'[]');return[];}}; export const sr=async d=>{try{await copyFile(f,f+'.bak');}catch{} await writeFile(f,JSON.stringify(d));};
 // @path: exec.js
 import { promisify } from 'util';
 import { exec as _exec } from 'child_process';
 
-export const exec = promisify(_exec);
+export const exec = (cmd, opts = {}) => {
+  const defaultOpts = { maxBuffer: 10 * 1024 * 1024 };
+  return promisify(_exec)(cmd, { ...defaultOpts, ...opts });
+};
 // @path: index.js
-import fs from'fs/promises';import path from'path';import{fileURLToPath}from'url';import{exec}from'./exec.js';import{a as c}from'./csv.js';import{c as p}from'./playlist.js';import{d as f}from'./filenames.js';import{lr}from'./record.js';import{O,T}from'./config.js';import{i,w,e,s,S}from'./utils/utils.js';
-const d=path.dirname(fileURLToPath(import.meta.url)),h=async(F,P,r,m='No files found.')=>{const L=(await fs.readdir(d)).filter(F);if(!L.length)return w(m);const a=[];for(const x of L){i(`Processing ${x}`);const{successful}=await P(path.join(d,x),r);a.push(...successful)}a.length?(S('\n📊 Downloads this session:'),a.forEach(({title:t,artist:A})=>s(A?`"${t}" by ${A}`:`"${t}"`))):i('No new songs downloaded.')};
-(async()=>{try{await exec('yt-dlp --version')}catch{e('yt-dlp not found in PATH');process.exit(1)}await Promise.all([O,T].map(d=>fs.mkdir(d,{recursive:!0})));const[,,m,a]=process.argv;if(!m)return e('Usage:\n  node index.js csv\n  node index.js playlist <url>\n  node index.js filenames'),process.exit(1);const r=await lr(),H={csv:()=>h(f=>f.endsWith('.csv'),c,r,'No CSV files found.'),playlist:async()=>{if(!a)return e('Usage: node index.js playlist <url>'),process.exit(1);const{successful,failed}=await p(a,r);S('\n📊 Session summary:'),s(`Successful: ${successful.length}`),failed.length?e(`Failed: ${failed.length}`):i('Failed: 0'),successful.length&&console.log('\n✔️ Successful:',successful.map(x=>`- ${x.title}`).join('\n')),failed.length&&console.log('\n❌ Failed:',failed.map(x=>`- ${x.title} (${x.reason})`).join('\n'))},filenames:()=>h(f=>f==='filenames.txt',f,r,'No filenames.txt found.')};if(!H[m])return e(`Unknown mode: ${m}`),process.exit(1);await H[m]();i('\nAll done!')})();
+import fs from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { exec } from './exec.js';
+import { processCsv } from './csv.js';
+import { processPlaylist } from './playlist.js';
+import { processFilenames } from './filenames.js';
+import { lr } from './record.js';
+import { O, T } from './config.js';
+import { i, w, e, s, S } from './utils/utils.js';
+
+const dir = path.dirname(fileURLToPath(import.meta.url));
+
+const processFolderFiles = async (filterFn, processor, record, noFilesMessage = 'No files found.') => {
+  const list = (await fs.readdir(dir)).filter(filterFn);
+  if (!list.length) return w(noFilesMessage);
+  const sessionDownloaded = [];
+  for (const filename of list) {
+    i(`Processing ${filename}`);
+    const res = await processor(path.join(dir, filename), record);
+    sessionDownloaded.push(...(res.successful || []));
+  }
+  if (sessionDownloaded.length) {
+    S('\n📊 Downloads this session:');
+    sessionDownloaded.forEach(({ title, artist }) => s(artist ? `"${title}" by ${artist}` : `"${title}"`));
+  } else {
+    i('No new songs downloaded.');
+  }
+};
+
+(async () => {
+  try {
+    await exec('yt-dlp --version');
+  } catch {
+    e('yt-dlp not found in PATH');
+    process.exit(1);
+  }
+
+  await Promise.all([O, T].map(d => fs.mkdir(d, { recursive: true })));
+
+  const [, , mode, arg] = process.argv;
+  if (!mode) {
+    e('Usage:\n  node index.js csv\n  node index.js playlist <url>\n  node index.js filenames');
+    process.exit(1);
+  }
+
+  const record = await lr();
+
+  const handlers = {
+    csv: () => processFolderFiles(f => f.endsWith('.csv'), processCsv, record, 'No CSV files found.'),
+    playlist: async () => {
+      if (!arg) {
+        e('Usage: node index.js playlist <url>');
+        process.exit(1);
+      }
+      const { successful, failed } = await processPlaylist(arg, record);
+      S('\n📊 Session summary:');
+      s(`Successful: ${successful.length}`);
+      if (failed.length) e(`Failed: ${failed.length}`);
+      else i('Failed: 0');
+      successful.length && console.log('\n✔️ Successful:', successful.map(x => `- ${x.title}`).join('\n'));
+      failed.length && console.log('\n❌ Failed:', failed.map(x => `- ${x.title} (${x.reason})`).join('\n'));
+    },
+    filenames: () => processFolderFiles(f => f === 'filenames.txt', processFilenames, record, 'No filenames.txt found.')
+  };
+
+  if (!handlers[mode]) {
+    e(`Unknown mode: ${mode}`);
+    process.exit(1);
+  }
+
+  await handlers[mode]();
+  i('\nAll done!');
+})();
+// @path: utils/record.js
+import { readFile, writeFile, copyFile, rename } from 'fs/promises';
+import { join } from 'path';
+import { dirFromMeta } from './utils/utils.js';
+
+const file = join(dirFromMeta(import.meta.url), 'downloaded.json');
+
+export const lr = async () => {
+  try {
+    const d = JSON.parse(await readFile(file, 'utf8'));
+    if (!Array.isArray(d)) throw 0;
+    return d;
+  } catch {
+    await writeFile(file, '[]');
+    return [];
+  }
+};
+
+export const sr = async (d) => {
+  try {
+    await copyFile(file, file + '.bak');
+  } catch {
+
+  }
+
+  const tmp = file + '.tmp';
+  await writeFile(tmp, JSON.stringify(d));
+  await rename(tmp, file);
+};
 // @path: utils/utils.js
-import{dirname}from'path';import{fileURLToPath}from'url';import{promisify}from'util';import{exec as _exec}from'child_process';
-const t=()=>`[${new Date().toISOString()}]`,L=(a,b)=>c=>console[a](`${t()} ${b} ${c}`);
-export const i=L('log','ℹ️'),w=L('warn','⚠️'),e=L('error','❌'),s=L('log','✔️'),S=L('log','📊');
-export const z=a=>a.replace(/[<>:"/\\|?*\x00-\x1F]/g,'_').trim(),q=(a='',b='')=>a.localeCompare(b,void 0,{sensitivity:'base'})===0,g=(a,...b)=>b.map(c=>a[c]?.trim()).find(Boolean)||'',n=()=>({successful:[],failed:[]});
-export const k=(a,b)=>b==='csv'?{title:a.title,artist:a.artist}:b==='playlist'?{id:a.id}:b==='filenames'?{title:a.title}:{},r=(a,b)=>a.some(c=>Object.keys(b).every(d=>q(c[d]||'',b[d]))),D=a=>dirname(fileURLToPath(a)),exec=promisify(_exec);
+import { dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const timeStamp = () => `[${new Date().toISOString()}]`;
+const loggerFactory = (method, label) => (msg) => console[method](`${timeStamp()} ${label} ${msg}`);
+
+export const i = loggerFactory('log', 'ℹ️');
+export const w = loggerFactory('warn', '⚠️');
+export const e = loggerFactory('error', '❌');
+export const s = loggerFactory('log', '✔️');
+export const S = loggerFactory('log', '📊');
+
+export const sanitizeFilename = (name) => name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').trim();
+
+export const equalsIgnoreCase = (a = '', b = '') =>
+  a.localeCompare(b, void 0, { sensitivity: 'base' }) === 0;
+
+export const getField = (obj = {}, ...keys) =>
+  keys.map(k => (obj[k] || '').toString().trim()).find(Boolean) || '';
+
+export const emptyResult = () => ({ successful: [], failed: [] });
+
+export const buildCheckKeys = (obj = {}, type = '') => {
+  if (type === 'csv') return { title: obj.title, artist: obj.artist };
+  if (type === 'playlist') return { id: obj.id };
+  if (type === 'filenames') return { title: obj.title };
+  return {};
+};
+
+export const recordMatches = (records = [], keys = {}) =>
+  records.some(rec => Object.keys(keys).every(k => equalsIgnoreCase((rec[k] || ''), (keys[k] || ''))));
+
+export const dirFromMeta = (metaUrl) => dirname(fileURLToPath(metaUrl));
+
+export const decodeEscapes = (s = '') =>
+  s.replace(/\\u([0-9a-fA-F]{4})/g, (_, g1) => String.fromCharCode(parseInt(g1, 16)));
+
+export const normalizeCsvRaw = (raw = '') =>
+  raw.replace(/\u0000/g, '').replace(/\r/g, '').replace(/\(From\s+"([^"]+)"\)/g, "(From '$1')");
+
+export const stripFileNoise = (s) => {
+  if (!s) return s;
+  s = decodeEscapes(s);
+  s = s.replace(/\+/g, ' ');
+  s = s.replace(/[_\-]{2,}/g, ' ');
+  s = s.replace(/\b\d+\s*bits\b/ig, '');
+  s = s.replace(/\b(?:mp3|m4a|flac|wav|aac|ogg)\b/ig, '');
+  s = s.replace(/\b(?:F10Musica|ADD|media-store)\b/ig, '');
+  s = s.replace(/(?:\b128kbps\b|\b320kbps\b)/ig, '');
+  s = s.replace(/[\u0000-\u001F]+/g, '');
+  s = s.replace(/[<>:"/\\|?*\x00-\x1F]+/g, ' ');
+  s = s.replace(/\s{2,}/g, ' ').trim();
+  return s;
+};
+
+export const extractDisplayName = (line = '') => {
+  try {
+    const decoded = decodeEscapes(line);
+    const dnMatch = decoded.match(/(?:\b|&|\?|p\s?dn=|dn=)([^&\n]+)/i);
+    if (dnMatch && dnMatch[1]) {
+      try {
+        return decodeURIComponent(dnMatch[1].replace(/\+/g, ' ')).trim();
+      } catch {
+        return dnMatch[1].replace(/\+/g, ' ').trim();
+      }
+    }
+    const tail = decoded.split('/').pop().replace(/\.[^/.]+$/, '').trim();
+    return tail;
+  } catch {
+    return line.replace(/\.[^/.]+$/, '').trim();
+  }
+};
 // @path: filenames.js
 import fs from 'fs/promises';
 import path from 'path';
-import { i,w,e,n,k } from './utils/utils.js';
-import { p } from './downloader.js';
+import { i, w, e, emptyResult, buildCheckKeys, stripFileNoise, extractDisplayName } from './utils/utils.js';
+import { processEntries } from './downloader.js';
 
-export const d = async(t,r)=>{const f=path.basename(t);try{const l=(await fs.readFile(t,'utf8')).split('\n').map(a=>a.trim()).filter(Boolean);if(!l.length)return w(`No filenames in "${f}"`)||n();return p(l.map(a=>({title:a.replace(/^\.\/(a\/)?/,'').replace(/\.[^/.]+$/,''),fileLine:a})),r,e_=>({title:e_.title,query:`ytsearch1:${e_.title}`,finalName:e_.title,checkKeys:k(e_,'filenames'),extraMeta:{sourceFile:f}}),`"${f}"`)}catch(a){return e(`❌ Error reading "${f}": ${a.message}`)||n()}}
+export const processFilenames = async (filePath, rec) => {
+  const filename = path.basename(filePath);
+  try {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n').map(a => a.trim()).filter(Boolean);
+    if (!lines.length) {
+      w(`No filenames in "${filename}"`);
+      return emptyResult();
+    }
+
+    const mapped = lines.map(line => {
+      const rawName = extractDisplayName(line);
+      const title = stripFileNoise(rawName) || rawName;
+      return { title, fileLine: line };
+    });
+
+    return processEntries(mapped, rec, e_ => ({
+      title: e_.title,
+      query: `ytsearch1:${e_.title}`,
+      finalName: e_.title,
+      checkKeys: buildCheckKeys(e_, 'filenames'),
+      extraMeta: { sourceFile: filename }
+    }), `"${filename}"`);
+  } catch (err) {
+    e(`❌ Error reading "${filename}": ${err.message}`);
+    return emptyResult();
+  }
+};
