@@ -1,3 +1,4 @@
+// @path: backend.js
 // @path: csv.js
 import fs from'fs/promises';import path from'path';import{parse}from'csv-parse/sync';import{g,n,k}from'./utils/utils.js';import{p}from'./downloader.js';
 
@@ -31,7 +32,7 @@ export const tryDownload = async (m, rec) => {
   }
 };
 
-export const processEntries = async (entries, rec, buildMeta, label) => {
+export const p = async (entries, rec, buildMeta, label) => {
   const s=[],f=[]; let d=0,sk=0,m=false;
   for(const ee of entries){
     const mObj = buildMeta(ee); if(!mObj) continue;
@@ -61,7 +62,7 @@ export const A = 'opus';
 export const X = '%(ext)s';
 
 export const Y =
-  `-x --no-playlist --restrict-filenames --audio-format=${A} --audio-quality=0 -f bestaudio --postprocessor-args "-ar 48000 -ac 2" `;
+  `-x --no-playlist --restrict-filenames -f bestaudio --audio-format=${A} --audio-quality 0 --postprocessor-args "-ar 48000 -ac 2"`;
 
 export const C = path.join(__dirname, 'cookies.txt');
 export const c = () => {
