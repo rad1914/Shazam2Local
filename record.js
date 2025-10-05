@@ -1,0 +1,2 @@
+// @path: record.js
+import { readFile, writeFile, copyFile } from 'fs/promises'; import { join } from 'path'; import { D } from './utils/utils.js'; const f = join(D(import.meta.url), 'downloaded.json'); export const lr=async()=>{try{const d=JSON.parse(await readFile(f,'utf8'));if(!Array.isArray(d))throw 0;return d;}catch{await writeFile(f,'[]');return[];}}; export const sr=async d=>{try{await copyFile(f,f+'.bak');}catch{} await writeFile(f,JSON.stringify(d));};
